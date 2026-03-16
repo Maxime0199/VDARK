@@ -27,10 +27,10 @@ suppressPackageStartupMessages({
 
 source("/srv/home/mlef0011/VDARK/src/utils.r")
 
-WD       <- "/srv/home/mlef0011/VDARK"
-MINIMAP  <- "/srv/home/mlef0011/anaconda3/envs/VDARK/bin/minimap2"
-REF      <- "/srv/home/mlef0011/rawdata/ref_genome/reference_genome_GRCh37.fa"
-N_CORES  <- max(1, detectCores() - 1)
+WD        <- "/srv/home/mlef0011/VDARK"
+MINIMAP   <- "/srv/home/mlef0011/anaconda3/envs/VDARK/bin/minimap2"
+REF       <- "/srv/home/mlef0011/rawdata/ref_genome/reference_genome_GRCh37.fa"
+N_CORES   <- 20
 
 
 # =============================================================================
@@ -71,7 +71,7 @@ system("/srv/home/mlef0011/anaconda3/condabin/conda run -n VDARK python3 /srv/ho
 log_msg("Clustering reads...")
 
 read_kmer_df <- fread(file.path(WD, "rawdata/reads/read_kmer_association.tsv"))
-read_kmer_df <- read_kmer_df[, if (.N <= 50) .SD, by = kmer]   # drop high-freq k-mers
+read_kmer_df <- read_kmer_df[, if (.N <= 50) .SD, by = kmer]  # drop high-freq k-mers
 
 pairs <- read_kmer_df[, {
     ids <- read_ID
@@ -81,9 +81,9 @@ pairs <- read_kmer_df[, {
     }
 }, by = kmer][, .(weight = .N), by = .(read_ID.x, read_ID.y)]
 
-G <- graph_from_data_frame(pairs, directed = FALSE)
+G        <- graph_from_data_frame(pairs, directed = FALSE)
 E(G)$weight <- pairs$weight
-clusters <- components(G)
+clusters <- get("components", envir = asNamespace("igraph"))(G)
 log_msg(clusters$no, " clusters")
 
 
@@ -93,38 +93,46 @@ log_msg(clusters$no, " clusters")
 
 process_cluster <- function(cluster_ID) {
 
-    log_msg("\n=================== Cluster: ", cluster_ID, " ===================")
+    # Buffer all messages — flush as one block at the end
+    logs <- character(0)
+    buf  <- function(...) logs <<- c(logs, paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", ...))
+
+    buf("===== Cluster ", cluster_ID, " =====")
 
     reads_in  <- names(clusters$membership)[clusters$membership == cluster_ID]
     kmers_sig <- unique(read_kmer_df$kmer[read_kmer_df$read_ID %in% reads_in])
     all_kmers <- unique(unlist(lapply(
         tumour_reads$sequence[tumour_reads$read_ID %in% reads_in], get_kmers
     )))
-
-    log_msg("  ", length(reads_in), " reads | ", length(kmers_sig), " specific k-mers")
+    buf("  reads: ", length(reads_in), " | specific k-mers: ", length(kmers_sig))
 
     # ── Assemble tumour contig ─────────────────────────────────────────────────
 
     contig_tumour <- assemble_kmers(kmers_sig, k = K)
-    log_msg("  Tumour contig: ", nchar(contig_tumour[1]), " bp")
+    if (is.null(contig_tumour) || nchar(contig_tumour[1]) < K) {
+        buf("  Tumour contig too short -- skipping")
+        message(paste(logs, collapse = "\n")); return(NULL)
+    }
+    buf("  Tumour contig: ", nchar(contig_tumour[1]), " bp")
 
     # ── Fetch normal reads via flanking k-mers ────────────────────────────────
 
     flanking_kmers <- setdiff(all_kmers, kmers_sig)
     flanking_kmers <- flanking_kmers[grepl("^[ACGT]+$", flanking_kmers)]
-    flanking_fa    <- file.path(WD, "tmp", paste0("flanking_", cluster_ID, ".fa"))
-    kmc_db         <- file.path(WD, "tmp", paste0("flanking_kmc_", cluster_ID))
+    tmp_cl      <- file.path(WD, "tmp", cluster_ID)
+    dir.create(tmp_cl, showWarnings = FALSE, recursive = TRUE)
+    flanking_fa <- file.path(tmp_cl, paste0("flanking_", cluster_ID, ".fa"))
+    kmc_db      <- file.path(tmp_cl, paste0("flanking_kmc_", cluster_ID))
 
     writeLines(paste0(">k_", seq_along(flanking_kmers), "\n", flanking_kmers), flanking_fa)
 
-    system(paste(KMC, "-k31 -t12 -ci1 -fm", flanking_fa, kmc_db, file.path(WD, "tmp")),
+    system(paste(KMC, "-k31 -t12 -ci1 -fm", flanking_fa, kmc_db, tmp_cl),
            ignore.stdout = TRUE, ignore.stderr = TRUE)
 
-    fq_R1_out <- file.path(WD, "tmp", paste0("normal_R1_locus_", cluster_ID, ".fq"))
-    fq_R2_out <- file.path(WD, "tmp", paste0("normal_R2_locus_", cluster_ID, ".fq"))
-
-    NORMAL_R1 = file.path(WD,"rawdata/reads/normal_R1.fq")
-    NORMAL_R2 = file.path(WD,"rawdata/reads/normal_R2.fq")
+    NORMAL_R1 <- file.path(WD, "rawdata/reads/normal_R1.fq")
+    NORMAL_R2 <- file.path(WD, "rawdata/reads/normal_R2.fq")
+    fq_R1_out <- file.path(tmp_cl, paste0("normal_R1_locus_", cluster_ID, ".fq"))
+    fq_R2_out <- file.path(tmp_cl, paste0("normal_R2_locus_", cluster_ID, ".fq"))
 
     system(paste(KMC_TOOLS, "filter", kmc_db, "-ci1", NORMAL_R1, fq_R1_out),
            ignore.stdout = TRUE, ignore.stderr = TRUE)
@@ -136,7 +144,7 @@ process_cluster <- function(cluster_ID) {
         error = function(e) data.frame(read_ID = character(), sequence = character())
     )
 
-    # Precise filtering: keep reads with ≥ 30 flanking k-mer hits
+    # Precise filtering: keep reads with >= 30 flanking k-mer hits
     if (nrow(normal_df) > 0) {
         pdict  <- PDict(unique(c(flanking_kmers,
                                  as.character(reverseComplement(DNAStringSet(flanking_kmers))))))
@@ -146,39 +154,54 @@ process_cluster <- function(cluster_ID) {
     }
 
     if (nrow(normal_df) == 0) {
-        log_msg("  No normal reads at locus — skipping")
-        return(NULL)
+        buf("  No normal reads at locus -- skipping")
+        message(paste(logs, collapse = "\n")); return(NULL)
     }
-    log_msg("  ", nrow(normal_df), " normal reads retained")
+    buf("  Normal reads retained: ", nrow(normal_df))
 
     # ── Assemble normal contig ─────────────────────────────────────────────────
 
-    kmer_counts   <- table(unlist(lapply(normal_df$sequence, get_kmers)))
-    contig_normal <- assemble_kmers(names(kmer_counts[kmer_counts >= 10]), k = K)
-    log_msg("  Normal contig: ", nchar(contig_normal[1]), " bp")
+    kmer_counts      <- table(unlist(lapply(normal_df$sequence, get_kmers)))
+    buf("  Normal k-mers with cov>=10: ", sum(kmer_counts >= 10), " / ", length(kmer_counts))
+    kmer_to_assemble <- names(kmer_counts[kmer_counts >= 10])
+
+    if (length(kmer_to_assemble) == 0) {
+        buf("  No k-mer with cov>=10 in normal -- skipping")
+        message(paste(logs, collapse = "\n")); return(NULL)
+    }
+
+    contig_normal <- assemble_kmers(kmer_to_assemble, k = K)
+    if (is.null(contig_normal) || nchar(contig_normal[1]) < K) {
+        buf("  Normal contig too short -- skipping")
+        message(paste(logs, collapse = "\n")); return(NULL)
+    }
+    buf("  Normal contig: ", nchar(contig_normal[1]), " bp")
 
     # ── Align tumour vs normal ─────────────────────────────────────────────────
 
     aln <- best_alignment(contig_normal, contig_tumour)
-    print_alignment(aln)
+    format_alignment(aln, cluster_ID, buf = buf)
 
     mm <- mismatchTable(aln)
     if (nrow(mm) == 0) {
-        log_msg("  No mismatches detected")
-        return(NULL)
+        buf("  No mismatches detected")
+        message(paste(logs, collapse = "\n")); return(NULL)
     }
 
     # ── Germline filter ────────────────────────────────────────────────────────
 
-    germline   <- is_germline(mm, contig_normal)
+    germline   <- is_germline(mm, contig_normal, cluster_ID, buf = buf)
     mm_somatic <- mm[!germline, ]
 
     if (nrow(mm_somatic) == 0) {
-        log_msg("  No somatic variants (all germline)")
-        return(NULL)
+        buf("  No somatic variants (all germline)")
+        message(paste(logs, collapse = "\n")); return(NULL)
     }
-    log_msg("  ", nrow(mm_somatic), " somatic SNV(s)")
+    buf("  Somatic SNV(s): ", nrow(mm_somatic))
 
+    # Flush all buffered messages as one block
+    message(paste(logs, collapse = "\n"))
+    unlink(tmp_cl, recursive = TRUE)
     list(
         cluster_ID    = cluster_ID,
         mismatches    = mm_somatic,
@@ -188,7 +211,7 @@ process_cluster <- function(cluster_ID) {
 }
 
 SNV_list <- Filter(Negate(is.null),
-                   lapply(seq_len(clusters$no), process_cluster))
+                   mclapply(seq_len(clusters$no), process_cluster, mc.cores = N_CORES))
 
 log_msg(length(SNV_list), " cluster(s) with somatic SNVs")
 
@@ -212,21 +235,29 @@ writeLines(
 system(paste(MINIMAP, "-ax sr", REF, contig_fa, ">", contig_sam))
 
 sam <- read.table(contig_sam, sep = "\t", comment.char = "@", fill = TRUE)
+# Filter SAM to keep only one line per contig (first occurrence of each QNAME)
+sam_clean <- sam[!duplicated(sam[, 1]), ]
+# Then reorder to match SNV_list order
+contig_names <- paste0("contig_cluster_", sapply(SNV_list, function(x) x$cluster_ID))
+sam_matched  <- sam_clean[match(contig_names, sam_clean[, 1]), ]
+# ── Build SNV table ───────────────────────────────────────────────────────────
 
-# ── Report SNV positions ───────────────────────────────────────────────────────
-
-cat("\n=================== Somatic SNVs ===================n")
-                            
 snv_rows <- lapply(seq_along(SNV_list), function(i) {
-    x          <- SNV_list[[i]]
-    mm         <- x$mismatches
-    flag       <- sam[i, 2]
-    is_reverse <- bitwAnd(flag, 16) != 0
-    chrom      <- as.character(sam[i, 3])
-    pos        <- as.integer(sam[i, 4])
-    contig_len <- nchar(as.character(sam[i, 10]))
+    x    <- SNV_list[[i]]
+    mm   <- x$mismatches
+    flag <- as.integer(sam_matched[i, 2])
 
-    cigar     <- as.character(sam[i, 6])
+    if (is.na(flag) || bitwAnd(flag, 4) != 0 || bitwAnd(flag, 2048) != 0) {
+        log_msg("  Cluster ", x$cluster_ID, " | contig unmapped or supplementary -- skipping")
+        return(NULL)
+    }
+
+    is_reverse <- bitwAnd(flag, 16) != 0
+    chrom      <- as.character(sam_matched[i, 3])
+    pos        <- as.integer(sam_matched[i, 4])
+    contig_len <- nchar(as.character(sam_matched[i, 10]))
+
+    cigar     <- as.character(sam_matched[i, 6])
     m         <- regmatches(cigar, regexpr("^([0-9]+)[SH]", cigar))
     left_clip <- if (length(m) > 0) as.integer(sub("[SH]", "", m)) else 0
 
@@ -236,31 +267,32 @@ snv_rows <- lapply(seq_along(SNV_list), function(i) {
         } else {
             pos + mm$PatternStart[j] - 1L
         }
-
         ref_nt <- as.character(mm$PatternSubstring[j])
         alt_nt <- as.character(mm$SubjectSubstring[j])
-
         if (is_reverse) {
             ref_nt <- as.character(reverseComplement(DNAString(ref_nt)))
             alt_nt <- as.character(reverseComplement(DNAString(alt_nt)))
         }
-
         data.frame(CHROM = chrom, POS = mut_pos, REF = ref_nt, ALT = alt_nt,
                    stringsAsFactors = FALSE)
     })
 })
 
+snv_df <- do.call(rbind, Filter(Negate(is.null), unlist(snv_rows, recursive = FALSE)))
 snv_df <- do.call(rbind, unlist(snv_rows, recursive = FALSE))
 snv_df <- snv_df[order(snv_df$CHROM, snv_df$POS), ]
 
-# Print
-cat("\n#CHROM\tPOS\tREF\tALT\n")
+# ── Print ─────────────────────────────────────────────────────────────────────
+
+cat("\n=================== Somatic SNVs ===================\n")
+cat("#CHROM\tPOS\tREF\tALT\n")
 for (i in seq_len(nrow(snv_df))) {
     cat(sprintf("%s\t%d\t%s\t%s\n",
                 snv_df$CHROM[i], snv_df$POS[i], snv_df$REF[i], snv_df$ALT[i]))
 }
 
-# Write TSV
+# ── Write TSV ─────────────────────────────────────────────────────────────────
+
 tsv_out <- file.path(WD, "results/somatic_snvs.tsv")
 dir.create(dirname(tsv_out), showWarnings = FALSE)
 writeLines(paste(c("#CHROM", "POS", "REF", "ALT"), collapse = "\t"), tsv_out)
