@@ -7,8 +7,6 @@
 library(Biostrings)
 library(pwalign)
 
-K <- 31
-
 WD        <- "/srv/home/mlef0011/VDARK"
 KMC       <- file.path(WD, "software/kmc/bin/kmc")
 KMC_TOOLS <- file.path(WD, "software/kmc/bin/kmc_tools")
@@ -20,7 +18,7 @@ log_msg <- function(...) message("[", format(Sys.time(), "%H:%M:%S"), "] ", ...)
 # ── K-mer utilities ───────────────────────────────────────────────────────────
 
 #' Extract canonical k-mers from a sequence
-get_kmers <- function(seq, k = K) {
+get_kmers <- function(seq, k) {
     n <- nchar(seq) - k + 1
     if (n <= 0) return(character(0))
     kmers <- substring(seq, 1:n, k:nchar(seq))
@@ -32,8 +30,8 @@ get_kmers <- function(seq, k = K) {
 # ── Contig assembly ───────────────────────────────────────────────────────────
 
 #' Greedy frequency-weighted k-mer assembly
-assemble_kmers <- function(kmers, k = K, kmer_freq = NULL) {
-
+assemble_kmers <- function(kmers, k, kmer_freq = NULL) {
+    kmers <- as.character(kmers) 
     if (length(kmers) == 0) return(NULL)
     if (length(kmers) == 1)
         return(c(kmers, as.character(reverseComplement(DNAString(kmers)))))
@@ -111,12 +109,10 @@ assemble_kmers <- function(kmers, k = K, kmer_freq = NULL) {
 
 #' Returns TRUE for each mismatch found in the normal sample (germline).
 #' buf: logging function from the caller (e.g. buf <- function(...) logs <<- c(logs, ...))
-is_germline <- function(mm, contig_normal, cluster_ID, k = K, threshold = 0,
+is_germline <- function(mm, contig_normal, NORMAL_R1, NORMAL_R2, cluster_ID, k , threshold = 3,
                         buf = log_msg) {
 
-    NORMAL_R1 <- file.path(WD, "rawdata/reads/normal_R1.fq")
-    NORMAL_R2 <- file.path(WD, "rawdata/reads/normal_R2.fq")
-    dir.create(TMP, showWarnings = FALSE)
+    dir.create(file.path(TMP, cluster_ID), showWarnings = FALSE)
 
     vapply(seq_len(nrow(mm)), function(i) {
         pos <- mm$PatternStart[i]
@@ -133,16 +129,16 @@ is_germline <- function(mm, contig_normal, cluster_ID, k = K, threshold = 0,
 
         tag      <- paste0("cl", cluster_ID, "_pos", pos)
         fa_file  <- file.path(TMP, cluster_ID, paste0("mut_kmers_", tag, ".fa"))
-        kmc_db_g <- file.path(TMP, cluster_ID, paste0("mut_kmc_",   tag))
+        kmc_db_g <- file.path(TMP, cluster_ID, paste0("mut_kmc_", tag))
         fq_R1_g  <- file.path(TMP, cluster_ID, paste0("normal_R1_", tag, ".fq"))
         fq_R2_g  <- file.path(TMP, cluster_ID, paste0("normal_R2_", tag, ".fq"))
 
         writeLines(paste0(">k_", seq_along(mut_kmers), "\n", mut_kmers), fa_file)
-        system(paste(KMC, "-k31 -t12 -ci1 -fm", fa_file, kmc_db_g, TMP),
+        system(paste(KMC, paste0("-k",K),"-t12 -ci1 -fm", fa_file, kmc_db_g, TMP),
                ignore.stdout = TRUE, ignore.stderr = TRUE)
-        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R1, fq_R1_g),
+        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R1, "-ci1", fq_R1_g),
                ignore.stdout = TRUE, ignore.stderr = TRUE)
-        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R2, fq_R2_g),
+        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R2, "-ci1", fq_R2_g),
                ignore.stdout = TRUE, ignore.stderr = TRUE)
 
         reads <- tryCatch(
@@ -159,7 +155,7 @@ is_germline <- function(mm, contig_normal, cluster_ID, k = K, threshold = 0,
         n_reads <- sum(colSums(vcountPDict(pdict, DNAStringSet(reads))) > 0)
         label   <- if (n_reads > threshold) "germline" else "somatic"
         buf("  pos ", pos, " | ", n_reads, " normal reads | ", label)
-
+        
         n_reads > threshold
     }, logical(1))
 }
