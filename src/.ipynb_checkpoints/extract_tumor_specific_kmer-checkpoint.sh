@@ -18,7 +18,11 @@ WD="/srv/home/mlef0011/VDARK"
 KMC="$WD/software/kmc/bin/kmc"
 KMC_TOOLS="$WD/software/kmc/bin/kmc_tools"
 GET_MIN="$WD/src/get_local_minimum.sh"
+<<<<<<< HEAD
 SUFFIX="chr21_k${K}"
+=======
+SUFFIX="k${K}"
+>>>>>>> 1d6bdf9a4bf4bd777b4dc1b9ca42945bc1278d5e
 
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -26,10 +30,17 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 # ── Count k-mers ──────────────────────────────────────────────────────────────
 
 log "Counting tumour k-mers..."
+<<<<<<< HEAD
 "$KMC" -k${K} -t${THREADS} -ci1 -cs1000 -fq @"$WD/rawdata/reads/tumour_fastq_chr21.txt" \
     "$WD/rawdata/kmer/tumour_${SUFFIX}_kmc" "$WD/tmp"
 
 "$KMC" -k${K} -t${THREADS} -ci1 -cs1000 -fq @"$WD/rawdata/reads/normal_fastq_chr21.txt" \
+=======
+"$KMC" -k${K} -t${THREADS} -ci1 -cs1000 -fq @"$WD/rawdata/reads/tumour_fastq.txt" \
+    "$WD/rawdata/kmer/tumour_${SUFFIX}_kmc" "$WD/tmp"
+
+"$KMC" -k${K} -t${THREADS} -ci1 -cs1000 -fq @"$WD/rawdata/reads/normal_fastq.txt" \
+>>>>>>> 1d6bdf9a4bf4bd777b4dc1b9ca42945bc1278d5e
     "$WD/rawdata/kmer/normal_${SUFFIX}_kmc" "$WD/tmp"
 
 # ── Histograms & dumps ────────────────────────────────────────────────────────
@@ -49,9 +60,19 @@ log "Generating histograms..."
 
 # ── Extract tumour-specific k-mers ────────────────────────────────────────────
 
+<<<<<<< HEAD
 log "Subtracting normal k-mers..."
 "$KMC_TOOLS" simple \
     "$WD/rawdata/kmer/tumour_${SUFFIX}_kmc" -ci3 \
+=======
+log "Detecting coverage threshold..."
+MIN_T=$($GET_MIN $WD/rawdata/kmer/tumour.histo)
+log "Coverage threshold: $MIN_T"
+
+log "Subtracting normal k-mers..."
+"$KMC_TOOLS" simple \
+    "$WD/rawdata/kmer/tumour_${SUFFIX}_kmc" -ci"$MIN_T" \
+>>>>>>> 1d6bdf9a4bf4bd777b4dc1b9ca42945bc1278d5e
     "$WD/rawdata/kmer/normal_${SUFFIX}_kmc" -ci2 \
     kmers_subtract \
     "$WD/rawdata/kmer/tumour_specific_${SUFFIX}"
@@ -63,11 +84,19 @@ log "Subtracting normal k-mers..."
 
 log "Filtering tumour-specific reads..."
 "$KMC_TOOLS" filter "$WD/rawdata/kmer/tumour_specific_${SUFFIX}" -ci1 -cx1000 \
+<<<<<<< HEAD
     "$WD/rawdata/reads/tumour_chr21_R1.fq" \
     "$WD/rawdata/reads/tumour_R1_tumour_specific_${SUFFIX}.fq"
 
 "$KMC_TOOLS" filter "$WD/rawdata/kmer/tumour_specific_${SUFFIX}" -ci1 -cx1000 \
     "$WD/rawdata/reads/tumour_chr21_R2.fq" \
+=======
+    "$WD/rawdata/reads/tumour_R1.fq" \
+    "$WD/rawdata/reads/tumour_R1_tumour_specific_${SUFFIX}.fq"
+
+"$KMC_TOOLS" filter "$WD/rawdata/kmer/tumour_specific_${SUFFIX}" -ci1 -cx1000 \
+    "$WD/rawdata/reads/tumour_R2.fq" \
+>>>>>>> 1d6bdf9a4bf4bd777b4dc1b9ca42945bc1278d5e
     "$WD/rawdata/reads/tumour_R2_tumour_specific_${SUFFIX}.fq"
 
 log "Done."
