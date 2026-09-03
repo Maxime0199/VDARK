@@ -1,10 +1,24 @@
 # =============================================================================
-# utils.R  (corrected)
+# utils.R  (fixed / consolidated)
 # Helper functions for k-mer extraction, contig assembly, alignment,
 # CIGAR parsing, and VAF estimation.
-# utils.R
-# Helper functions for k-mer extraction, contig assembly, and alignment.
 # Sourced by pipeline.R.
+#
+# CHANGEMENTS vs version precedente :
+#   - Suppression des definitions dupliquees (get_kmers, is_germline,
+#     best_alignment etaient chacune definies 2 fois ; la derniere gagnait
+#     silencieusement, avec des signatures incompatibles avec pipeline.r).
+#   - is_germline() : conserve la version "groupee" (comparaison par fenetres
+#     de k-mers chevauchantes, sans aucun appel KMC/system()) qui correspond
+#     a ce que pipeline.r appelle reellement.
+#   - best_alignment() : la premiere definition n'etait jamais fermee
+#     (pairwiseAlignment(...) sans parenthese/accolade fermante), ce qui
+#     provoquait une erreur de syntaxe au parsing. Reecrite complete et
+#     fermee, renvoie bien list(alignment=, normal_rc=) comme attendu.
+#   - Tous les caracteres Unicode decoratifs (separateurs "----", tirets
+#     cadratins, accents francais dans les commentaires/messages) ont ete
+#     remplaces par de l'ASCII pur, pour eviter toute erreur de parsing liee
+#     a la locale du noeud de calcul (invalid multibyte character in parser).
 # =============================================================================
 
 library(Biostrings)
@@ -15,12 +29,15 @@ WD        <- "/srv/home/mlef0011/VDARK"
 KMC       <- file.path(WD, "software/kmc/bin/kmc")
 KMC_TOOLS <- file.path(WD, "software/kmc/bin/kmc_tools")
 TMP       <- file.path(WD, "tmp")
-SPADES <- "/srv/home/mlef0011/anaconda3/envs/VDARK/bin/spades.py"
+SPADES    <- "/srv/home/mlef0011/anaconda3/envs/VDARK/bin/spades.py"
 
 
 log_msg <- function(...) message("[", format(Sys.time(), "%H:%M:%S"), "] ", ...)
 
 
+# -- Diagnostic helper : inspect / split a cluster via Leiden communities ----
+# NB : non appelee par pipeline.r actuellement (outil de diagnostic manuel),
+# conservee ici au cas ou tu t'en sers en interactif.
 inspect_and_split_cluster <- function(cluster_ID, G, clusters,
                                       min_modularity = 0.25, resolution = 1.0) {
 
@@ -38,10 +55,10 @@ inspect_and_split_cluster <- function(cluster_ID, G, clusters,
     n_comm <- length(unique(membership(comm)))
     mod    <- if (n_comm > 1) modularity(subG, membership(comm), weights = E(subG)$weight) else NA_real_
 
-    cat("Communautés Leiden:", n_comm, "| modularité:", round(mod, 3), "\n")
+    cat("Communautes Leiden:", n_comm, "| modularite:", round(mod, 3), "\n")
 
     if (n_comm <= 1 || is.na(mod) || mod < min_modularity) {
-        cat("-> Pas de split fiable, cluster conservé tel quel.\n")
+        cat("-> Pas de split fiable, cluster conserve tel quel.\n")
         return(invisible(list(split = FALSE)))
     }
 
@@ -55,10 +72,10 @@ inspect_and_split_cluster <- function(cluster_ID, G, clusters,
 }
 
 
-# ── K-mer utilities ───────────────────────────────────────────────────────────
+# ---- K-mer utilities -------------------------------------------------------
 
 #' Extract canonical k-mers from a sequence
-get_kmers <- function(seq, k) {
+get_kmers <- function(seq, k = K) {
     n <- nchar(seq) - k + 1
     if (n <= 0) return(character(0))
     kmers <- substring(seq, 1:n, k:nchar(seq))
@@ -66,12 +83,20 @@ get_kmers <- function(seq, k) {
     ifelse(kmers < rc, kmers, rc)
 }
 
+#' Extract ALL k-mers (non-canonical, both strands not collapsed)
+#' Useful for VAF counting where we need exact matching
+get_kmers_raw <- function(seq, k = K) {
+    n <- nchar(seq) - k + 1
+    if (n <= 0) return(character(0))
+    substring(seq, 1:n, k:nchar(seq))
+}
 
-# ── Contig assembly ───────────────────────────────────────────────────────────
+
+# ---- Contig assembly (greedy, used by pipeline_greedy.r) ------------------
 
 #' Greedy frequency-weighted k-mer assembly
 assemble_kmers <- function(kmers, k, kmer_freq = NULL) {
-    kmers <- as.character(kmers) 
+    kmers <- as.character(kmers)
     if (length(kmers) == 0) return(NULL)
     if (length(kmers) == 1)
         return(c(kmers, as.character(reverseComplement(DNAString(kmers)))))
@@ -144,29 +169,8 @@ assemble_kmers <- function(kmers, k, kmer_freq = NULL) {
     c(best, rc_best)
 }
 
-                                     
-                                     
-# ── K-mer utilities ───────────────────────────────────────────────────────────
 
-#' Extract canonical k-mers from a sequence
-get_kmers <- function(seq, k = K) {
-    n <- nchar(seq) - k + 1
-    if (n <= 0) return(character(0))
-    kmers <- substring(seq, 1:n, k:nchar(seq))
-    rc    <- as.character(reverseComplement(DNAStringSet(kmers)))
-    ifelse(kmers < rc, kmers, rc)
-}
-
-#' Extract ALL k-mers (non-canonical, both strands not collapsed)
-#' Useful for VAF counting where we need exact matching
-get_kmers_raw <- function(seq, k = K) {
-    n <- nchar(seq) - k + 1
-    if (n <= 0) return(character(0))
-    substring(seq, 1:n, k:nchar(seq))
-}
-
-
-# ── CIGAR parsing & coordinate conversion ─────────────────────────────────────
+# ---- CIGAR parsing & coordinate conversion ---------------------------------
 
 #' Parse a CIGAR string into a data.frame of (length, operation) pairs
 #' @return data.frame with columns: len (integer), op (character)
@@ -209,32 +213,40 @@ query_pos_to_ref_pos <- function(query_pos, cigar, ref_start) {
             r <- r + len
 
         } else if (op == "I") {
-            # Insertion — consumes query only
+            # Insertion -- consumes query only
             if (query_pos <= q + len) return(NA_integer_)
             q <- q + len
 
         } else if (op == "S") {
-            # Soft clip — consumes query only (bases present in SEQ but unaligned)
+            # Soft clip -- consumes query only (bases present in SEQ but unaligned)
             if (query_pos <= q + len) return(NA_integer_)
             q <- q + len
 
         } else if (op %in% c("D", "N")) {
-            # Deletion / skipped region — consumes reference only
+            # Deletion / skipped region -- consumes reference only
             r <- r + len
 
         }
-        # H (hard clip) and P (padding) consume neither → skip
+        # H (hard clip) and P (padding) consume neither -> skip
     }
     NA_integer_
 }
 
 
+# ---- Germline filter --------------------------------------------------------
 
-                                            
-
-# ── Germline filter ───────────────────────────────────────────────────────────
-
-
+#' Returns TRUE for each mismatch that looks germline (present in normal reads).
+#'
+#' Strategy: for each mismatch position, build the mutant k-mer window and
+#' count how many normal reads contain it, in memory (no KMC/system() call --
+#' the normal reads passed in are already the ones fetched for this cluster).
+#' Two tests are tried and the max is kept:
+#'   Test A: mutate only this position, leave neighbouring mismatches as-is
+#'   Test B: mutate this position AND all mismatches in the same "group"
+#'           (positions closer than k bp apart, i.e. sharing a k-mer window)
+#'           together -- this handles phased germline SNPs where the
+#'           expected k-mer only matches real reads if built from the correct
+#'           haplotype (both nearby variants substituted at once).
 is_germline <- function(mm, contig_strand, normal_seqs, k = K, threshold = 10,
                         buf = log_msg) {
 
@@ -242,8 +254,8 @@ is_germline <- function(mm, contig_strand, normal_seqs, k = K, threshold = 10,
 
     reads_dna <- DNAStringSet(normal_seqs)
 
-    # ── Groupes de mismatches dont les fenêtres de k-mers se chevauchent ────
-    # (positions distantes de moins de k pb -> même fenêtre potentielle)
+    # -- Groupes de mismatches dont les fenetres de k-mers se chevauchent ----
+    # (positions distantes de moins de k pb -> meme fenetre potentielle)
     ord      <- order(mm$PatternStart)
     pos_ord  <- mm$PatternStart[ord]
     new_grp  <- c(TRUE, diff(pos_ord) >= k)
@@ -267,12 +279,12 @@ is_germline <- function(mm, contig_strand, normal_seqs, k = K, threshold = 10,
         if (substr(contig_strand, pos, pos) != as.character(mm$PatternSubstring[i]))
             return(FALSE)
 
-        # ── Test A : seule cette position mutée, voisins laissés tels quels ──
+        # -- Test A : seule cette position mutee, voisins laisses tels quels --
         seq_a <- contig_strand
         substr(seq_a, pos, pos) <- as.character(mm$SubjectSubstring[i])
         n_reads_a <- count_matching_reads(seq_a, pos, k)
 
-        # ── Test B : cette position + tous ses voisins de groupe mutés ensemble ──
+        # -- Test B : cette position + tous ses voisins de groupe mutes ensemble --
         mates <- which(group_id == group_id[i])
         n_reads_b <- 0L
         if (length(mates) > 1) {
@@ -290,20 +302,21 @@ is_germline <- function(mm, contig_strand, normal_seqs, k = K, threshold = 10,
         is_germ
     }, logical(1))
 }
-                                            
-# ── Alignment ─────────────────────────────────────────────────────────────────
+
+
+# ---- Alignment ---------------------------------------------------------------
 
 #' Best local alignment across all 4 strand orientations.
 #'
 #' Returns a list with:
-#'   $alignment   — the PairwiseAlignmentsSingleSubject object
-#'   $normal_rc   — TRUE if contig_normal[2] (RC) was the best pattern
+#'   $alignment   -- the PairwiseAlignmentsSingleSubject object
+#'   $normal_rc   -- TRUE if contig_normal[2] (RC) was the best pattern
 #'
 #' Scoring rationale:
-#'   match=1, mismatch=-1  — standard for closely related sequences (tumour
+#'   match=1, mismatch=-1  -- standard for closely related sequences (tumour
 #'     vs normal differ by few SNVs), balanced so that a single SNV doesn't
 #'     mask surrounding matches.
-#'   gapOpening=-5, gapExtension=-2 — penalises gaps (indels in the contig
+#'   gapOpening=-5, gapExtension=-2 -- penalises gaps (indels in the contig
 #'     alignment) enough to avoid spurious gapped alignments for SNV-only
 #'     detection.  If you ever extend to indel calling, consider relaxing
 #'     gapOpening to -3.
@@ -317,77 +330,6 @@ best_alignment <- function(contig_normal, contig_tumour) {
     alns <- lapply(orientations, function(o) {
         pairwiseAlignment(
             DNAString(o$n), DNAString(o$t),
-
-
-# ── Germline filter ───────────────────────────────────────────────────────────
-
-#' Returns TRUE for each mismatch found in the normal sample (germline).
-#' buf: logging function from the caller (e.g. buf <- function(...) logs <<- c(logs, ...))
-is_germline <- function(mm, contig_normal, NORMAL_R1, NORMAL_R2, cluster_ID, k , threshold = 3,
-                        buf = log_msg) {
-
-    dir.create(file.path(TMP, cluster_ID), showWarnings = FALSE)
-
-    vapply(seq_len(nrow(mm)), function(i) {
-        pos <- mm$PatternStart[i]
-        seq <- contig_normal[1]
-
-        if (substr(seq, pos, pos) != as.character(mm$PatternSubstring[i]))
-            return(FALSE)
-
-        substr(seq, pos, pos) <- as.character(mm$SubjectSubstring[i])
-
-        s_min     <- max(1, pos - k + 1)
-        s_max     <- min(pos, nchar(seq) - k + 1)
-        mut_kmers <- substring(seq, s_min:s_max, (s_min:s_max) + k - 1)
-
-        tag      <- paste0("cl", cluster_ID, "_pos", pos)
-        fa_file  <- file.path(TMP, cluster_ID, paste0("mut_kmers_", tag, ".fa"))
-        kmc_db_g <- file.path(TMP, cluster_ID, paste0("mut_kmc_", tag))
-        fq_R1_g  <- file.path(TMP, cluster_ID, paste0("normal_R1_", tag, ".fq"))
-        fq_R2_g  <- file.path(TMP, cluster_ID, paste0("normal_R2_", tag, ".fq"))
-
-        writeLines(paste0(">k_", seq_along(mut_kmers), "\n", mut_kmers), fa_file)
-        system(paste(KMC, paste0("-k",K),"-t12 -ci1 -fm", fa_file, kmc_db_g, TMP),
-               ignore.stdout = TRUE, ignore.stderr = TRUE)
-        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R1, "-ci1", fq_R1_g),
-               ignore.stdout = TRUE, ignore.stderr = TRUE)
-        system(paste(KMC_TOOLS, "filter", kmc_db_g, "-ci1", NORMAL_R2, "-ci1", fq_R2_g),
-               ignore.stdout = TRUE, ignore.stderr = TRUE)
-
-        reads <- tryCatch(
-            as.character(c(readDNAStringSet(fq_R1_g, format = "fastq"),
-                           readDNAStringSet(fq_R2_g, format = "fastq"))),
-            error = function(e) character(0)
-        )
-        file.remove(fa_file, fq_R1_g, fq_R2_g)
-
-        if (length(reads) == 0) return(FALSE)
-
-        rc_mut  <- as.character(reverseComplement(DNAStringSet(mut_kmers)))
-        pdict   <- PDict(unique(c(mut_kmers, rc_mut)))
-        n_reads <- sum(colSums(vcountPDict(pdict, DNAStringSet(reads))) > 0)
-        label   <- if (n_reads > threshold) "germline" else "somatic"
-        buf("  pos ", pos, " | ", n_reads, " normal reads | ", label)
-        
-        n_reads > threshold
-    }, logical(1))
-}
-
-
-# ── Alignment ─────────────────────────────────────────────────────────────────
-
-#' Best local alignment across all 4 strand orientations
-best_alignment <- function(contig_normal, contig_tumour) {
-    orientations <- list(
-        c(contig_normal[1], contig_tumour[1]),
-        c(contig_normal[1], contig_tumour[2]),
-        c(contig_normal[2], contig_tumour[1]),
-        c(contig_normal[2], contig_tumour[2])
-    )
-    alns <- lapply(orientations, function(x) {
-        pairwiseAlignment(
-            DNAString(x[1]), DNAString(x[2]),
             type = "local",
             substitutionMatrix = nucleotideSubstitutionMatrix(match = 1, mismatch = -1),
             gapOpening   = -5,
@@ -399,8 +341,6 @@ best_alignment <- function(contig_normal, contig_tumour) {
         alignment = alns[[best_idx]],
         normal_rc = orientations[[best_idx]]$normal_rc
     )
-
-    alns[[which.max(sapply(alns, score))]]
 }
 
 
@@ -416,25 +356,24 @@ format_alignment <- function(aln, cluster_ID, buf = log_msg) {
 }
 
 
-# ── VAF estimation ────────────────────────────────────────────────────────────
+# ---- VAF estimation ----------------------------------------------------------
 
 #' Extract ALL tumour reads at a locus using flanking k-mers.
-
 extract_tumour_reads_at_locus <- function(kmc_db, tmp_dir,
                                           min_hits = 10) {
- 
+
     TUMOUR_R1 <- file.path(WD, "rawdata/reads/tumour_chr21_R1.fq")
     TUMOUR_R2 <- file.path(WD, "rawdata/reads/tumour_chr21_R2.fq")
- 
-    fq_R1 <- file.path(tmp_dir, paste0("tumour_vaf_R1_.fq"))
-    fq_R2 <- file.path(tmp_dir, paste0("tumour_vaf_R2_.fq"))
- 
+
+    fq_R1 <- file.path(tmp_dir, "tumour_vaf_R1_.fq")
+    fq_R2 <- file.path(tmp_dir, "tumour_vaf_R2_.fq")
+
     ci_flag <- paste0("-ci", min_hits)
     system(paste(KMC_TOOLS, "filter", kmc_db, "-ci1", TUMOUR_R1, ci_flag, fq_R1),
            ignore.stdout = TRUE, ignore.stderr = TRUE)
     system(paste(KMC_TOOLS, "filter", kmc_db, "-ci1", TUMOUR_R2, ci_flag, fq_R2),
            ignore.stdout = TRUE, ignore.stderr = TRUE)
- 
+
     reads <- tryCatch(
         as.character(c(readDNAStringSet(fq_R1, format = "fastq"),
                        readDNAStringSet(fq_R2, format = "fastq"))),
@@ -445,71 +384,69 @@ extract_tumour_reads_at_locus <- function(kmc_db, tmp_dir,
 }
 
 #' Estimate variant allele frequency (VAF) from ALL tumour reads at a locus.
-                                            
 estimate_vaf <- function(mm, contig_strand, all_tumour_reads, k = K) {
- 
+
     na_row <- data.frame(n_alt = NA_integer_, n_ref = NA_integer_, vaf = NA_real_)
- 
+
     if (length(all_tumour_reads) == 0)
         return(do.call(rbind, replicate(nrow(mm), na_row, simplify = FALSE)))
- 
+
     reads_dna <- DNAStringSet(all_tumour_reads)
- 
+
     rows <- lapply(seq_len(nrow(mm)), function(i) {
- 
+
         pos        <- mm$PatternStart[i]
         ref_allele <- as.character(mm$PatternSubstring[i])
         alt_allele <- as.character(mm$SubjectSubstring[i])
         seq_len    <- nchar(contig_strand)
- 
-        # ── Build REF and ALT k-mers from the FULL contig ────────────────────
+
+        # -- Build REF and ALT k-mers from the FULL contig --------------------
         s_min <- max(1L, pos - k + 1L)
         s_max <- min(pos, seq_len - k + 1L)
         if (s_min > s_max) return(na_row)
- 
+
         ref_kmers <- substring(contig_strand, s_min:s_max, (s_min:s_max) + k - 1L)
- 
+
         alt_contig <- contig_strand
         substr(alt_contig, pos, pos) <- alt_allele
         alt_kmers <- substring(alt_contig, s_min:s_max, (s_min:s_max) + k - 1L)
- 
+
         # Sanity: remove any k-mers with non-ACGT characters
         ref_kmers <- ref_kmers[grepl("^[ACGT]+$", ref_kmers)]
         alt_kmers <- alt_kmers[grepl("^[ACGT]+$", alt_kmers)]
- 
+
         if (length(ref_kmers) == 0 || length(alt_kmers) == 0) return(na_row)
- 
-        # ── Include reverse complements ──────────────────────────────────────
+
+        # -- Include reverse complements ---------------------------------------
         ref_all <- unique(c(ref_kmers,
                             as.character(reverseComplement(DNAStringSet(ref_kmers)))))
         alt_all <- unique(c(alt_kmers,
                             as.character(reverseComplement(DNAStringSet(alt_kmers)))))
- 
-        # ── Count per read ───────────────────────────────────────────────────
+
+        # -- Count per read -----------------------------------------------------
         tryCatch({
             pdict_ref <- PDict(DNAStringSet(ref_all))
             pdict_alt <- PDict(DNAStringSet(alt_all))
- 
+
             ref_counts <- colSums(vcountPDict(pdict_ref, reads_dna))
             alt_counts <- colSums(vcountPDict(pdict_alt, reads_dna))
- 
+
             informative <- (ref_counts + alt_counts) > 0
             if (sum(informative) == 0) return(na_row)
- 
+
             # Assign each read to ALT or REF by majority of hits
-            # Ties → REF (conservative)
+            # Ties -> REF (conservative)
             n_alt <- sum(alt_counts[informative] > ref_counts[informative])
             n_ref <- sum(ref_counts[informative] >= alt_counts[informative])
- 
+
             data.frame(n_alt = n_alt, n_ref = n_ref,
                        vaf   = n_alt / (n_alt + n_ref))
         }, error = function(e) na_row)
     })
- 
+
     do.call(rbind, rows)
 }
- 
-                   
+
 
 # Filter mismatches whose (pos, ref, alt) matches a normal-contig bubble.
 filter_germline_bubbles <- function(mm, contig_strand, normal_bubbles_df,
@@ -532,7 +469,7 @@ filter_germline_bubbles <- function(mm, contig_strand, normal_bubbles_df,
             DNAStringSet(bubbles_local$alt_allele)))
     }
 
-    # Tolerate ±1 nt to absorb any off-by-one in path locating
+    # Tolerate +/-1 nt to absorb any off-by-one in path locating
     is_germ <- vapply(seq_len(nrow(mm)), function(i) {
         pos <- mm$PatternStart[i]
         ref <- as.character(mm$PatternSubstring[i])
@@ -548,4 +485,3 @@ filter_germline_bubbles <- function(mm, contig_strand, normal_bubbles_df,
             " mismatches matching normal-contig bubbles (germline)")
     is_germ
 }
-
